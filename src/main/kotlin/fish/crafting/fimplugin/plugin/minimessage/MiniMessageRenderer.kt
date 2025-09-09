@@ -3,7 +3,6 @@ package fish.crafting.fimplugin.plugin.minimessage
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorCustomElementRenderer
 import com.intellij.openapi.editor.Inlay
-import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.markup.TextAttributes
 import fish.crafting.fimplugin.plugin.minimessage.parser.MiniMessageParser
 import fish.crafting.fimplugin.plugin.minimessage.parser.TextComponent
@@ -12,8 +11,6 @@ import fish.crafting.fimplugin.plugin.minimessage.parser.resolver.GradientTagRes
 import fish.crafting.fimplugin.plugin.minimessage.parser.resolver.RainbowTagResolver
 import fish.crafting.fimplugin.plugin.util.ObfuscationUtil
 import java.awt.*
-import kotlin.math.max
-import kotlin.math.min
 
 class MiniMessageRenderer(private val components: ArrayList<TextComponent>,
                           private var text: String,
@@ -75,45 +72,28 @@ class MiniMessageRenderer(private val components: ArrayList<TextComponent>,
         g2.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_OFF)
 
         var styledFont: Font? = null
+        lastColor = null
         for (component in components) {
-            val baseFont = if (component.styling.bold) {
-                MinecraftFont.bold
-            } else {
-                MinecraftFont.font
-            }
+            val baseFont = if (component.styling.bold) MinecraftFont.bold else MinecraftFont.font
+            styledFont = applyStylingToFont(editor, baseFont, component.styling)
 
-            var text = component.content
-
-            if (component.styling.obfuscated) {
-                val metrics = g.getFontMetrics(baseFont)
-                text = ObfuscationUtil.obfuscate(g, metrics, baseFont, text)
-            }
-
-            styledFont = applyStylingToFont(inlay.editor, baseFont, component.styling)
-            g2.font = styledFont
-
-            // Drawing Text
-
-            val baseColor = component.styling.color
-
-            val addedWidth = when(baseColor) {
-                is GradientTagResolver.GradientColorElement -> {
-                    renderIndividuallyColoredChars(g2, text, x, y, component, baseColor::getColor)
-                }
-                is RainbowTagResolver.RainbowColorElement -> {
-                    renderIndividuallyColoredChars(g2, text, x, y, component, baseColor::getColor)
-                }
+            val addedWidth = when(val baseColor = component.styling.color) {
+                is GradientTagResolver.GradientColorElement ->
+                    drawComponent(g2, component, x, y, editor, { i -> baseColor.getColor(i, renderIndex) }, false)
+                is RainbowTagResolver.RainbowColorElement ->
+                    drawComponent(g2, component, x, y, editor, { i -> baseColor.getColor(i, renderIndex) }, false)
                 is TextStyling.SolidColorElement -> {
-                    renderSolidColor(g2, text, baseColor, x, y, component)
+                    val c = baseColor.color
+                    lastColor = Color(c.red, c.green, c.blue, 50)
+                    drawComponent(g2, component, x, y, editor, { _ -> c }, true)
                 }
                 else -> 0
             }
 
-            if(blank) blank = text.isBlank()
+            if(blank) blank = component.content.isBlank()
 
             x += addedWidth
             width += addedWidth
-
         }
 
         val updateWidth = this.width != width
@@ -142,55 +122,70 @@ class MiniMessageRenderer(private val components: ArrayList<TextComponent>,
         if(updateWidth || updateBG) inlay.update()
     }
 
-    //Yes I know this is terrible
-    private fun renderIndividuallyColoredChars(g2: Graphics2D,
-                                               text: String,
-                                               x: Int, y: Int,
-                                               component: TextComponent,
-                                               colorGetter: (Int, Int) -> Color): Int{
-        var width = 0
-        var x2 = x
-        for (ch in text) {
-            val letter = ch.toString()
-            val color = colorGetter.invoke(1, renderIndex)
+    private fun drawComponent(g2: Graphics2D, component: TextComponent, x: Int, y: Int, editor: Editor, colorGetter: (Int) -> Color, isSolidColor: Boolean): Int {
+        val text = component.content
+        if (text.isEmpty()) return 0
 
-            drawText(g2, x2 + 2, y + 2, letter, component.styling.getShadow(color), component.styling)
-            val w = drawText(g2, x2, y, letter, color, component.styling)
+        val styling = component.styling
+        val baseFont = if (styling.bold) MinecraftFont.bold else MinecraftFont.font
+        val styledBaseFont = applyStylingToFont(editor, baseFont, styling)
+        val styledUnifont = applyStylingToFont(editor, MinecraftFont.unifont, styling)
 
-            x2 += w
-            width += w
+        var currentX = x
+
+        if (isSolidColor) {
+            val color = colorGetter(0)
+            val shadowColor = styling.getShadow(color)
+            var startIndex = 0
+            while (startIndex < text.length) {
+                val canDisplay = baseFont.canDisplay(text[startIndex])
+                var endIndex = startIndex + 1
+                while (endIndex < text.length && baseFont.canDisplay(text[endIndex]) == canDisplay) {
+                    endIndex++
+                }
+                val substring = text.substring(startIndex, endIndex)
+                val font = if (canDisplay) styledBaseFont else styledUnifont
+                val textToDraw = if (styling.obfuscated) ObfuscationUtil.obfuscate(g2, g2.getFontMetrics(font), font, substring) else substring
+
+                g2.font = font
+                g2.color = shadowColor
+                g2.drawString(textToDraw, currentX + 2, y + 2)
+                g2.color = color
+                g2.drawString(textToDraw, currentX, y)
+
+                currentX += g2.fontMetrics.stringWidth(textToDraw)
+                startIndex = endIndex
+            }
+        } else {
+            for ((index, char) in text.withIndex()) {
+                val font = if (baseFont.canDisplay(char)) styledBaseFont else styledUnifont
+                g2.font = font
+                val charToDraw = if (styling.obfuscated) ObfuscationUtil.obfuscate(g2, g2.getFontMetrics(font), font, char.toString()) else char.toString()
+                val color = colorGetter(index)
+
+                g2.color = styling.getShadow(color)
+                g2.drawString(charToDraw, currentX + 2, y + 2)
+                g2.color = color
+                g2.drawString(charToDraw, currentX, y)
+
+                currentX += g2.fontMetrics.stringWidth(charToDraw)
+            }
         }
 
-        return width
-    }
+        val totalWidth = currentX - x
 
-    private fun renderSolidColor(g2: Graphics2D,
-                                 text: String,
-                                 colorElement: TextStyling.SolidColorElement,
-                                 x: Int, y: Int,
-                                 component: TextComponent): Int {
-        val color = colorElement.color
-        lastColor = Color(color.red, color.green, color.blue, 50)
-        drawText(g2, x + 2, y + 2, text, component.styling.getShadow(color), component.styling)
-        return drawText(g2, x, y, text, color, component.styling)
-    }
-
-    private fun drawText(g2: Graphics2D, x: Int, y: Int, text: String, color: Color, styling: TextStyling): Int {
-        g2.color = color
-        val width = g2.fontMetrics.stringWidth(text)
-        g2.drawString(text, x, y)
-
-        if (styling.underlined) {
-            val underlineY = y + 1
-            g2.drawLine(x, underlineY, x + width, underlineY)
+        if (styling.underlined || styling.strikethrough) {
+            g2.color = colorGetter(0)
+            if (styling.underlined) {
+                g2.drawLine(x, y + 1, x + totalWidth, y + 1)
+            }
+            if (styling.strikethrough) {
+                val strikeY = y - g2.getFontMetrics(styledBaseFont).height / 3
+                g2.drawLine(x, strikeY, x + totalWidth, strikeY)
+            }
         }
 
-        if (styling.strikethrough) {
-            val strikeY = y - g2.fontMetrics.height / 3
-            g2.drawLine(x, strikeY, x + width, strikeY)
-        }
-
-        return width
+        return totalWidth
     }
 
     private fun applyStylingToFont(editor: Editor, base: Font, style: TextStyling): Font {
